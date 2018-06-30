@@ -6,8 +6,6 @@ import gzip
 import ujson as json
 import pandas
 
-import attrs
-
 class SummaryBuilder(object):
 
     def __init__(self):
@@ -17,62 +15,46 @@ class SummaryBuilder(object):
         information about different Twitter users and then converting this
         information into a CSV file or Pandas DataFrame on demand """
 
-        self.attrs = {}
-        self.attrs_order = None
+        self.attr_extractors = []
         self.results = []
-
-        self.read_attrs_from_module(attrs)
 
     def read_attrs_from_module(self, module):
         """ Read attribute functions from a module
 
         :param module module: The module containing attribute functions to be
-            harvested from. All attribute functions should begin with ``attr``,
-            take a list of tweets as the only argument, and return a single
-            value. See attrs.py for examples.
+            harvested from. All attribute functions should begin with ``attr_``
+            or ``attrs_`` take a list of tweets as the only argument, and
+            return a dict where the keys are attribute names and the values are
+            the values. See attrs.py for examples.
         """
 
         if (len(self.results) > 0):
             raise Exception("cannot add attributes after data has been read")
 
         else:
-            new_attrs = {
-                name.replace("attr_", ""): getattr(attrs, name)
+            new_extractors = [
+                getattr(attrs, name)
                 for name in filter(
-                    lambda x: x.startswith("attr_"),
+                    lambda x: x.startswith("attr_") or x.startswith("attrs_"),
                     dir(attrs)
                 )
-            }
-            self.attrs.update(new_attrs)
-            self.attrs_order = sorted(self.attrs.keys())
+            ]
+            self.attr_extractors.extend(new_extractors)
 
-            print("added %s new attrs from %s\n=> %s" % (
-                len(new_attrs), module, list(new_attrs.keys())
+            print("added %s new attribute extractors from %s\n=> %s" % (
+                len(new_extractors), module,
+                ", ".join([fn.__name__ for fn in new_extractors])
             ))
 
-    def add_attr_function(self, name, function):
+    def add_attr_function(self, function):
         """ Add a single attribute function
 
-        :param str name: The name of the attribute
         :param function function: The function that is used to calculate the
-            value of the attribute. See read_attrs_from_module for more info.
+            values of attributes. See read_attrs_from_module for more info.
         """
 
-        self.attrs[name] = function
-
-    def set_attr_order(self, order):
-        """ Change the order of attributes in the output or select specific
-        ones
-
-        :param list order: A list of attributes, in the order that they should
-            be displayed. This list should only consider attributes loaded
-            by read_attrs_from_module or add_attr_function.
-        """
-
-        for attr in order:
-            if (not attr in self.attrs):
-                raise Exception("no function for attribute %s is defined" % attr)
-        self.attrs_order = order
+        print("added attribute extractor %s" % function.__name__)
+        self.attr_extractors.append(function)
 
     def process_user(self, user_json_gz):
         """ Compute and store attributes for a single user
@@ -81,15 +63,15 @@ class SummaryBuilder(object):
             tweets, in JSON format, with one tweet on each line
         """
 
-        user_results = []
+        user_results = {}
 
         with gzip.open(user_json_gz) as f:
             tweets = [
                 json.loads(line)
                 for line in f
             ]
-            for attr in self.attrs_order:
-                user_results.append(self.attrs[attr](tweets))
+            for attr_extractor in self.attr_extractors:
+                user_results.update(attr_extractor(tweets))
 
         self.results.append(user_results)
 
@@ -99,9 +81,10 @@ class SummaryBuilder(object):
         :param str csv_path: The path that the CSV file should be written to
         """
 
+        columns = self.results[0].keys()
         with open(csv_path, "w") as f:
             writer = csv.writer(f)
-            writer.writerow(self.attrs_order)
+            writer.writerow(columns)
             writer.writerows(self.results)
 
         print("wrote to %s" % csv_path)
@@ -113,13 +96,27 @@ class SummaryBuilder(object):
         :rtype: pandas.core.frame.DataFrame
         """
 
-        return pandas.DataFrame(self.results, columns = self.attrs_order)
+        return pandas.DataFrame(self.results)
 
 if (__name__ == "__main__"):
     import sys
+    import attrs
+
     s = SummaryBuilder()
+
+    # automatically load attribute extractors from a module
+    s.read_attrs_from_module(attrs)
+
+    # add a custom attribute extractor
+    attrs_most_frequent_multiple = attrs.setup_most_frequent({
+        "name": ["user", "name"],
+        "username": ["user", "screen_name"],
+    })
+    s.add_attr_function(attrs_most_frequent_multiple)
+
     for user in sys.argv[1:]:
         s.process_user(user)
+
     print("")
     print(s.to_df())
     s.to_csv("temp.csv")
